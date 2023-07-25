@@ -2,6 +2,12 @@
 # Nov 1, 2020
 # This script is intended to download data from Garmin and then insert it into an InfluxDB
 
+from datetime import date,timedelta
+import time
+import logging
+import os
+
+from dotenv import load_dotenv
 
 from garminconnect import (
     Garmin,
@@ -9,29 +15,26 @@ from garminconnect import (
     GarminConnectTooManyRequestsError,
     GarminConnectAuthenticationError,
 )
-
-from datetime import date, timedelta
-import time
 from influxdb import InfluxDBClient
 
-import logging
 logging.basicConfig(level=logging.DEBUG)
-start_date = date(2018,4,1)
-end_date = date(2020,11,1)
+load_dotenv()
 
 today = date.today()
+end_date = today
+start_date = today - timedelta(days = 1)
 # The speed multiplier was found by taking the "averageSpeed" float from an activity and comparing
 # to the speed reporting in the app. For example a speed of 1.61199998 * multiplyer = 5.77804 km/hr
 speed_multiplier = 3.584392177
-garmin_username = ''
-garmin_password = ""
-
+garmin_username = os.getenv('GARMIN_USERNAME')
+garmin_password = os.getenv('GARMIN_PASSWORD')
 garmin_date_format = "%Y-%m-%d"
-influx_server = "192.168.99.60"
-influx_port = 8086
-influx_username = ""
-influx_password = ""
-influx_db = "garmin"
+
+influx_server = os.getenv('INFLUX_SERVER')
+influx_port = os.getenv('INFLUX_PORT')
+influx_username = os.getenv('INFLUX_USERNAME')
+influx_password = os.getenv('INFLUX_PASSWORD')
+influx_db = os.getenv('INFLUX_DATABASE')
 influxdb_time_format = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -198,6 +201,11 @@ def create_influxdb_multi_measurement(user_data, subset_list_of_stats, start_tim
     temp_dict = {}
     date_format = date_format
     for entry in user_data:
+        if 'activityType' in entry:
+            activity_type = entry['activityType']['typeKey']
+        else:
+            activity_type = None
+
         activity_start = entry[start_time_heading]
         if timestamp_offset:
             timestamp = time.mktime(time.strptime(activity_start, date_format)) + 14400
@@ -205,10 +213,14 @@ def create_influxdb_multi_measurement(user_data, subset_list_of_stats, start_tim
             timestamp = time.mktime(time.strptime(activity_start, date_format))
         current_date = time.strftime(influxdb_time_format, time.localtime(round(timestamp)))
         for heading in subset_list_of_stats:
+            value = entry[heading]
+            if heading in ('distance', 'duration', 'averageSpeed', 'maxSpeed') and activity_type is not None:
+                heading = activity_type + '_' + heading
             try:
-                temp_dict[current_date].update({heading: entry[heading]})
+                temp_dict[current_date].update({heading: value})
             except KeyError:
-                temp_dict[current_date] = {heading: entry[heading]}
+                temp_dict[current_date] = {heading: value}
+
     for heading, inner_dict in temp_dict.items():
         for inner_heading, value in inner_dict.items():
             if value is None:
@@ -224,14 +236,13 @@ def create_influxdb_multi_measurement(user_data, subset_list_of_stats, start_tim
                 influxdb_client.write_points(json_body)
     print("")
 
-
 client = connect_to_garmin(username=garmin_username,password=garmin_password)
 
 # unless you want to graph the hourly heart rate times heart_rate is useless as you can get this info
 # from the daily stats
 # heart_rate = get_data_from_garmin("heart_rate", "client.get_heart_rates(today.isoformat())", client=client)
 
-activities = get_data_from_garmin("activities", "client.get_activities(0, 10)", client=client)  # 0=start, 1=limit
+activities = get_data_from_garmin("activities", "client.get_activities(0, 20)", client=client)  # 0=start, 1=limit
 activity_list = ['distance', 'duration', 'averageSpeed', 'maxSpeed', 'averageHR', 'maxHR',
                 'averageRunningCadenceInStepsPerMinute', 'steps', 'avgStrideLength']
 # there is very little data in the step_data so it's not worth re-skinning
@@ -250,7 +261,6 @@ for x in range(time_delta.days +1):
     client_get_sleep = 'client.get_sleep_data("%s")' % date_without_leading_zero
     client_get_stats = 'client.get_stats("%s")' % date_without_leading_zero
     step_data = get_data_from_garmin("step_data", client_get_data, client=client)
-
     stats = get_data_from_garmin("stats", client_get_stats, client=client)
     sleep_data = get_data_from_garmin("sleep_data", client_get_sleep, client=client)
     sleep_data_date = time.mktime(time.strptime(sleep_data['dailySleepDTO']['calendarDate'], garmin_date_format))
